@@ -13,10 +13,10 @@
 # **Advanced Lane Finding**
 
 ---
-
-![alt text][gif_result]
-
----
+<p align="center">
+	<img src="/media/output.gif" alt="result"
+	title="result"  />
+</p>
 
 ### Objectives:
 
