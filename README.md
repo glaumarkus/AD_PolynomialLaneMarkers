@@ -10,6 +10,9 @@
 
 
 # Advanced Lane Finding
+
+![alt text][gif_result]
+
 ### Objectives:
 
 1. compute camera calibration to correct for distortion in input images
