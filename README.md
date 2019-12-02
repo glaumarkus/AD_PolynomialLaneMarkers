@@ -1,5 +1,3 @@
-[//]: # (Image References)
-
 [cam_cal]: ./media/cam_cal.png "Camera Calibration"
 [dist_cor]: ./media/dist_correction.png "Distortion Correction"
 [bin]: ./media/binary.png "Camera Calibration"
@@ -7,17 +5,11 @@
 [lane_blocks]: ./media/lane_blocks.png "Lane Blocks"
 [area]: ./media/lane_area.png "Lane Area"
 [measures]: ./media/lane_area_measures.png "Measures"
+[confidence]: ./media/confidence_windows.gif "Confidence"
 [gif_result]: ./media/output.gif "Road Lane Detection"
 
 
-# **Advanced Lane Finding**
-
----
-<p align="center">
-	<img src="/media/output.gif" alt="result"
-	title="result"  />
-</p>
-
+# Advanced Lane Finding
 ### Objectives:
 
 1. compute camera calibration to correct for distortion in input images
@@ -35,6 +27,7 @@ import cv2
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import numpy as np
+from collections import deque
 
 plt.rcParams['figure.figsize'] = [15,15]
 plt.rcParams['image.cmap'] = 'gray'
@@ -106,20 +99,13 @@ compare_pictures(
 ```
 
     17/20 corners found
-
+    
 ![alt text][cam_cal]
-
-
-## 2. Color Masking
-
-The input image is converted into HSV Format to filter out all white and yellow colors between a given range. With the or statement a binary image is returned with all pixels that fall in between the chosen color range. 
 
 
 ```python
 img = mpimg.imread(glob.glob('test_images/*jpg')[0])
 img_undist = cal_undistort(img, objpoints, imgpoints)
-img_copy = cv2.cvtColor(img_undist, cv2.COLOR_RGB2HSV)
-
 compare_pictures(
     img, 
     img_undist, 'Original', 'Undistorted')
@@ -128,17 +114,42 @@ compare_pictures(
 ![alt text][dist_cor]
 
 
+## 2. Color Masking
+
+The input image is converted into HSV Format to apply some filtering to the image.
+
+The filtering includes a saturation filter on the S channel, which only takes the top 5% of saturated pixels (nanquantile). This way, sudden changes of brightness will not effect the quality of the outcome to much and the line is still clearly visible. As a second filtering, white and yellow colors are filtered out with the given channel information. Both masks are then applied with the or statement, to create the binary image for further processing.
+
+
+```python
+img_copy = cv2.cvtColor(img_undist, cv2.COLOR_RGB2HSV)
+```
+
 ```python
 def get_binary(img):
     
-    LOW_WHITE = np.array([0, 0, 200], dtype=np.uint8)
-    HIGH_WHITE = np.array([90,70,255], dtype=np.uint8)
-    LOW_YELLOW = np.array([10,120,200], dtype=np.uint8)
-    HIGH_YELLOW = np.array([30,255,255], dtype=np.uint8)
+    # Saturation Filters
+    S = img[:,:,2]
+    #thresh = (np.nanquantile(S, 0.95),255)
 
-    wmask = cv2.inRange(img, LOW_WHITE, HIGH_WHITE)
-    ymask = cv2.inRange(img, LOW_YELLOW, HIGH_YELLOW)
-    binary = cv2.bitwise_or(ymask, wmask)
+    # numpy version is outdated, therefore workaround
+    sorted_s = sorted(S.reshape(-1))
+    quantile = int(len(sorted_s) * 0.95)
+    thresh = (float(sorted_s[quantile]), 255)
+    s_mask = cv2.inRange(S, thresh[0], thresh[1])
+    
+    # Color Filters
+    low_white = np.array([0, 0, 225], dtype=np.uint8)
+    high_white = np.array([90,70,255], dtype=np.uint8)
+    low_yellow = np.array([14,120,220], dtype=np.uint8)
+    high_yellow = np.array([30,255,255], dtype=np.uint8)
+
+    white_mask = cv2.inRange(img, low_white, high_white)
+    yellow_mask = cv2.inRange(img, low_yellow, high_yellow)
+    
+    color_mask = cv2.bitwise_or(white_mask, yellow_mask)
+    
+    binary = cv2.bitwise_or(color_mask, s_mask)
     
     return binary
 
@@ -164,21 +175,19 @@ def warp_perspective(img, src, dst):
     return warped_image
 ```
 
-
 ```python
 src = np.float32(
 [[150,720], # bottom left
  [1130, 720], # bottom right
- [570,450], # top left
- [670, 450]]) # top right
+ [500,460], # top left
+ [740, 460]]) # top right
 
 dst = np.float32(
-[[100,720],
- [1130, 720],
+[[380,720],
+ [900, 720],
  [150,0],
  [1080, 0]])
 ```
-
 
 ```python
 binary_warped = warp_perspective(binary, src, dst)
@@ -267,7 +276,7 @@ def create_window_nonlinear(binary_warped, y_coords, last_window, window_size = 
     return pts_left, pts_right, left_base, right_base, int(np.mean(y_coords))
 ```
 
-To iterate through the complete image we initialize the current bases with None so the first observation will not get corrected. First I started with a fixed window size for the base finding function, but noticed that it failed to detect the lane in cases where dotted lanes lead to errors finding the base. Therefore I start with a big window (25% of img) and decrease the size every window by 30% to a minimum of at least 40 pixels. This leads to a small error on the bottom of the screen but increases the quality for pixels further down the road. 
+To iterate through the complete image we initialize the current bases with None so the first observation will not get corrected. First I started with a fixed window size for the base finding function, but noticed that it failed to detect the lane in cases where dotted lanes lead to errors finding the base. Therefore I start with a bigger window (20% of img) and decrease the size every window by 30% to a minimum of 60 pixels. This leads to a small error on the bottom of the screen but increases the quality for pixels further down the road. 
 
 A rectangle with the returned coords will be drawn in an empty image. Additionally we initialize lists to track the x and y position we will calculate a polyfit later on.  
 
@@ -289,9 +298,9 @@ def get_poly_bases_nonlinear(binary_warped):
 
     start = binary_warped.shape[0]
     smaller_each_step = 0.7
-    smallest_size = 40
-    size = int(start / 4)
-
+    smallest_size = 60
+    size = int(start / 5)
+    
     while start > 0:
         
         start_y = start
@@ -305,13 +314,12 @@ def get_poly_bases_nonlinear(binary_warped):
             [end_y, start_y],
             [left_base, right_base])
         
-        if last_left_base != left_base and last_right_base != right_base:
-            cv2.rectangle(out_img,pts_left[0],
+        cv2.rectangle(out_img,pts_left[0],
                 pts_left[1],(0,255,0), 5) 
-            cv2.rectangle(out_img,pts_right[0],
+        cv2.rectangle(out_img,pts_right[0],
                 pts_right[1],(0,255,0), 5)
 
-            left_i.append(left_base); right_i.append(right_base); y_vals.append(y_val)
+        left_i.append(left_base); right_i.append(right_base); y_vals.append(y_val)
         
         start = end_y
         size = int(size * smaller_each_step)
@@ -323,6 +331,7 @@ def get_poly_bases_nonlinear(binary_warped):
     y_vals = np.array(y_vals)
     
     return left_i, right_i, y_vals, out_img
+
 l,r,y, i = get_poly_bases_nonlinear(binary_warped)
 plt.imshow(i);
 ```
@@ -330,59 +339,49 @@ plt.imshow(i);
 ![alt text][lane_blocks]
 
 
-With the 3 arrays with all the information (x,y) about the lanes, we fit a polynomial to the gathered points and plot it with an area on an empty frame. This also takes the last observation into account and tries to implement a smoothing effect by averaging it with the last observation. Additionally the last observation also serves as a fallback lane if the detected lane differs to much from the last observation. If the lane is slowly shifting above the given confidence interval (between 0.25 and 4 of the last observation), it will be ignored for 10 steps before starting to average the lane again. 
+Since the calculated bases serve as the input for calculating the polynomial, we want to smooth the lane by avaraging the difference of the base with the last observation of the base. If the base is not within a confidence window of 70 pixels, the last known base will be taken. This way single wrong frame calculations do not effect the overall quality as much. Therefore we create global deque list, were the last observation will be stored after calculation.
 
 
 ```python
-ign = False # ignore current lane
-ign_steps = 0
+OBS_LEN = 1
+obs_l = deque(maxlen=OBS_LEN)
+obs_r = deque(maxlen=OBS_LEN)
 
-def draw_poly(binary_warped, last_left_fit, last_right_fit):
+def compare_bases(base_new, base_old):
     
-    global ign, ign_steps
+    out = np.zeros_like(base_new)
+    for i in range(0, len(base_new)):  
+
+        if (base_old[0][i] - 70) < base_new[i] < (base_old[0][i] + 70):
+            out[i] = np.mean([base_new[i], base_old[0][i]])
+        else:
+            out[i] = base_old[0][i]
+    return out
+```
+
+With the 3 arrays with all the information (x,y) about the lanes, we fit a polynomial to the gathered points and plot it with an area on an empty frame. The function returns the image with drawn lanes, the polynomial fits for both lanes and the image with confidence intervals.
+
+
+```python
+def draw_poly(binary_warped):
+    
+    global obs_l, obs_r
     
     out_lanes = np.zeros_like(np.dstack((binary_warped, binary_warped, binary_warped))*255)
     
     left_i, right_i, y_vals, intervals = get_poly_bases_nonlinear(binary_warped)
-
+    
+    if len(obs_l) != 0:
+        left_i, right_i = compare_bases(left_i, obs_l), compare_bases(right_i, obs_r)
+    obs_l.append(left_i); obs_r.append(right_i)
+    
     left_fit = np.polyfit(y_vals, left_i, 2)
     right_fit = np.polyfit(y_vals, right_i, 2)
-
-    ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0])
     
-    # validating and avaraging current observation
-    if last_left_fit[0] != None:
-        if abs(last_left_fit[0]) * 0.25 < abs(left_fit[0]) < abs(last_left_fit[0]) * 4:
-            left_fitx = np.mean([left_fit[0], last_left_fit[0]])*ploty**2 + np.mean([left_fit[1], last_left_fit[1]])*ploty + np.mean([left_fit[2], last_left_fit[2]])
-            left_fit = (np.array(left_fit) + np.array(last_left_fit)) / 2.0
-        else:
-            if ign_steps > 11:
-                ign_steps = 0
-                left_fitx = np.mean([left_fit[0], last_left_fit[0]])*ploty**2 + np.mean([left_fit[1], last_left_fit[1]])*ploty + np.mean([left_fit[2], last_left_fit[2]])
-            else:
-                left_fitx = last_left_fit[0]*ploty**2 + last_left_fit[1]*ploty + last_left_fit[2]
-                ign = True
-            ign_steps += 1
-                   
-    else:
-        left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
+    ploty = np.linspace(50, binary_warped.shape[0]-1, binary_warped.shape[0])
         
-
-    if last_right_fit[0] != None:
-        if abs(last_right_fit[0]) * 0.25 < abs(right_fit[0]) < abs(last_right_fit[0]) * 4:
-            right_fitx = np.mean([right_fit[0], last_right_fit[0]])*ploty**2 + np.mean([right_fit[1], last_right_fit[1]])*ploty + np.mean([right_fit[2], last_right_fit[2]])
-            right_fit = (np.array(right_fit) + np.array(last_right_fit)) / 2.0      
-        else:
-            if ign_steps > 11:
-                ign_steps = 0
-                right_fitx = np.mean([right_fit[0], last_right_fit[0]])*ploty**2 + np.mean([right_fit[1], last_right_fit[1]])*ploty + np.mean([right_fit[2], last_right_fit[2]])
-            else:
-                right_fitx = last_right_fit[0]*ploty**2 + last_right_fit[1]*ploty + last_right_fit[2]
-                ign = True
-            ign_steps += 1
-            
-    else:
-        right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
+    left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
+    right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
     
     # Plots the left and right polynomials on the lane lines
     left_lane = np.vstack((left_fitx, ploty)).T.astype(np.int32)
@@ -393,21 +392,27 @@ def draw_poly(binary_warped, last_left_fit, last_right_fit):
     cv2.polylines(out_lanes, [right_lane], isClosed=False, color=(141,2,31), thickness=60)
     cv2.fillConvexPoly(out_lanes, area, color=(80,200,122))
     
-    return out_lanes, left_fit, right_fit, left_lane, right_lane
+    return out_lanes, left_fit, right_fit, left_lane, right_lane, intervals
 ```
 
-Now we can outwarp the perspective and weight the two images within the plot. As can be seen, the identified area has a high proximity with the actual lane.
+Now we can outwarp the perspective and weight the two images within the plot. As can be seen, the identified area has a high proximity with the actual lane. Also the identified intervals will serve as verification and fallback for following frames. 
 
 
 ```python
-lanes, left_fit, right_fit, left_lane, right_lane = draw_poly(binary_warped, [None], [None])
+lanes, left_fit, right_fit, left_lane, right_lane, intervals = draw_poly(binary_warped)
 lanes = warp_perspective(lanes, dst, src)
+intervals = warp_perspective(intervals, dst, src)
 
 final_img = cv2.addWeighted(img,0.9,lanes,.7,0)
-plt.imshow(final_img);
+interval_img = cv2.addWeighted(img,0.9,intervals,.7,0)
+
+compare_pictures(
+    final_img, 
+    interval_img, 'Area', 'Confidence Intervals')
 ```
 
 ![alt text][area]
+
 
 ## 6. Turn-curvature & vehicle position on road
 
@@ -433,7 +438,7 @@ image_center = int(img.shape[0] / 2)
 
 lane_diffs = [((COORDS[0] + COORDS[1]) / 2 - image_center) * cm_per_pixel 
               for COORDS in zip(right_lane[::-1][:20].T[0], left_lane[::-1][:20].T[0])]
-lane_dif = round(np.mean(lane_diffs), 3)
+lane_dif = round(np.mean(lane_diffs), 2)
 ```
 
 To display the information on the image we set up a standard text for both measures.
@@ -492,7 +497,6 @@ Dealing with a stream of image data like in a camera means applying the above st
 5. fit polynomial to identified lane points
 6. draw and distort the ploted image on the input
 7. calculate curvature & position on road
-8. store observations for next frame
 
 
 ```python
@@ -500,21 +504,12 @@ from moviepy.editor import VideoFileClip
 from IPython.display import HTML
 
 input_vid = 'project_video.mp4'
-output_vid = 'project_video_altered.mp4'
-```
-
-
-```python
-last_left_fit, last_right_fit, last_lanes = [None], [None], None
-ign_steps = 0
-ign = False
+output_vid = 'output_project_video.mp4'
 ```
 
 
 ```python
 def video_img_processing(img):
-    
-    global last_left_fit, last_right_fit, last_lanes, ign
     
     img_copy = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
     img_copy = cal_undistort(img_copy, objpoints, imgpoints)
@@ -522,38 +517,47 @@ def video_img_processing(img):
     binary = get_binary(img_copy)
     binary_warped = warp_perspective(binary, src, dst)
     
-    lanes, left_fit, right_fit, left_lane, right_lane = draw_poly(binary_warped, last_left_fit, last_right_fit)
- 
+    lanes, left_fit, right_fit, left_lane, right_lane, intervals = draw_poly(binary_warped)
+    
+    # displaying drawn lanes
     lanes = warp_perspective(lanes, dst, src)
     final_img = cv2.addWeighted(img,0.9,lanes,.7,0)
     
+    # displaying confidence intervals
+    #intervals = warp_perspective(intervals, dst, src)
+    #final_img = cv2.addWeighted(img,0.9,intervals,.7,0)
+    
     final_img = get_position_text(left_lane, right_lane, final_img)
     final_img = get_curve_text(left_fit, right_fit, final_img)
-    
-    if not ign:
-        last_left_fit = left_fit
-        last_right_fit = right_fit
-        last_lanes = lanes
-    ign = False
-    
+
     return final_img
 ```
 
 
 ```python
-last_left_fit, last_right_fit, last_lanes = [None], [None], None
-ign_steps = 0
-ign = False
+obs_l = deque(maxlen=OBS_LEN)
+obs_r = deque(maxlen=OBS_LEN)
 
 clip = VideoFileClip(input_vid)
-clip_annotated = clip.fl_image(video_img_processing).subclip(0,5)
+clip_annotated = clip.fl_image(video_img_processing)
 %time clip_annotated.write_videofile(output_vid, audio=False)
 ```
-   
+
 ![alt text][gif_result]
+![alt_text][confidence]
+
 
 ## Weaknesses and shortcomings
 
-Changing weather conditions like intense light or dark shadows will harm the quality of the binary image with lots of input. 
+Changing weather conditions like intense light or dark shadows will harm the quality of the binary image with lots of input. This can also be observed within the video around 25-30s where a sudden change in brightness disturbs the observation. 
 
-Additionally the performance of the image processing is not quite as fast as the images come in. Expecting a 25fps Video, the programm will need 1s per frame on a good computer, therefore some steps that repeat and dont change over time could be avoided. Some ways to reduce processing may be working with deques for past oberservations and average those, so not every frame has to be evalued. Additionally one could apply some machine learning for correctly identifying lanes, which would also reduce the verification steps. 
+Additionally the performance of the image processing is not quite as fast as the images come in. Expecting a 25fps Video, the programm will need 1s per frame on a good computer, therefore some steps that repeat and dont change over time could be avoided. Some ways to reduce processing may be working with deques for past oberservations and average those, so not every frame has to be evalued. Additionally one could apply some machine learning for correctly identifying lanes, which would also reduce the verification steps and heavy image processing. When comparing the computation time for each step, one can clearly see that the distortion correction is by far the heaviest calculation in the pipeline, so every performance improvement here will massively improve the speed of the programm. 
+
+Process Time:
+- Converting 0.01
+- Undistorting 1.31
+- Binary 1.63
+- Warping 1.64
+- Lane Finding 1.66
+- Warping 1.67
+- Calculations 1.67
